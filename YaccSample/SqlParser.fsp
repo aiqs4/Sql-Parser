@@ -1,0 +1,953 @@
+﻿%{
+open Sql
+%}
+
+%token <string> ID
+%token <string> STRING
+%token <int> INT
+%token <float> FLOAT
+
+%token AND OR 
+%token PLUS MINUS DIV STAR MODULO//TODO: implemnt other operators!
+%token NOT
+
+%token BIT_NOT BIT_AND BIT_XOR BIT_OR
+%token PLUS_EQ MINUS_EQ STAR_EQ DIV_EQ MOD_EQ AND_EQ XOR_EQ OR_EQ
+
+%token COMMA LPAREN RPAREN AT SEMI
+%token EQ LT LE GT GE LTGT NE NLT NGT 
+%token ALL ANY BETWEEN IN LIKE SOME 
+
+
+%token EXISTS
+%token JOIN INNER LEFT RIGHT CROSS FULL APPLY OUTER ON
+%token SELECT TOP PERCENT DISTINCT FROM WHERE GROUP HAVING ORDER BY
+%token INSERT INTO UPDATE DELETE VALUES SET
+%token DEFAULT NULL
+%token ASC DESC
+%token AS DECLARE
+%token EXCEPT UNION INTERSECT //TODO: not yet implemented.
+%token IF ELSE WHILE BEGIN END TRY CATCH RAISERROR PRINT //TODO: RAISERROR & print is not yet implemented
+%token WITH
+%token CREATE DROP ALTER TABLE PROC PROCEDURE TRIGGER VIEW TYPE FUNCTION
+%token GO FOR AFTER REPLICATION OFF INSTEAD OF
+%token NOCOUNT QUOTED_IDENTIFIER ANSI_NULLS //ANSI_WARNINGS ANSI_QUOTES ANSI_PADDING XACT_ABORT
+//%token 
+%token DOUBLEQUOTE QUOTE 
+
+%token RANK NTILE DENSE_RANK ROW_NUMBER PARTITION OVER
+
+%token NOLOCK INDEX KEEPIDENTITY KEEPDEFAULTS FASTFIRSTROW HOLDLOCK 
+%token IGNORE_CONSTRAINTS IGNORE_TRIGGERS NOWAIT PAGLOCK READCOMMITTED 
+%token READCOMMITTEDLOCK READUNCOMMITTED READPAST REPEATABLEREAD ROWLOCK SERIALIZABLE
+%token TABLOCK TABLOCKX UPDLOCK XLOCK FORCESEEK NOEXPAND FORCESCAN
+
+%token TRAN TRANSACTION ROLLBACK COMMIT MARK SAVE WORK
+%token EXEC EXECUTE RECOMPILE OUTPUT
+
+%token CURSOR LOCAL GLOBAL FORWARD_ONLY SCROLL STATIC KEYSET DYNAMIC FAST_FORWARD
+%token READ_ONLY SCROLL_LOCKS OPTIMISTIC TYPE_WARNING OPEN CLOSE DEALLOCATE FETCH 
+%token NEXT PRIOR FIRST LAST ABSOLUTE RELATIVE
+
+%token EOF
+
+//%left
+//%right
+//%nonassoc
+//TODO: implement precedence
+//8: = (Assignment) //TODO: more then one precedence!
+//7: ALL, ANY, BETWEEN, IN, LIKE, OR, SOME
+//6: AND
+//5: NOT
+//4: =, >, <, >=, <=, <>, !=, !>, !< (Comparison operators)
+//3: + (Positive), - (Negative), + (Add), (+ Concatenate), - (Subtract), & (Bitwise AND), ^ (Bitwise Exclusive OR), | (Bitwise OR)
+//2: * (Multiply), / (Division), % (Modulo)
+//1: ~ (Bitwise NOT)
+
+//%left ALL ANY BETWEEN IN LIKE OR SOME
+//%left AND
+//%left NOT
+//%left EQ GT LT GE LE LTGT NE NGT NLE
+//%left PLUS MINUS BIT_AND BIT_XOR BIT_OR //TODO: unary and binary has the same precedence? really?
+//%left STAR DIV MODULO
+//%left BIT_NOT
+
+// start
+%start start
+%type <Sql.sqlStatement list> start
+
+%%
+
+start:
+    | statementlist EOF { List.rev $1 }
+    |               EOF { [] }
+
+statementlist:
+    | statementBlock               { $1 }        
+    | statementlist statementBlock { $2 @ $1 }
+
+statementBlock: 
+    | openStmt  { $1 }
+    | closeStmt { $1 }
+
+openStmt:
+    | IF LPAREN conditionList RPAREN 
+      statementBlock                     { [IfStmt({ Expr = $3; 
+                                                     If = $5; 
+                                                     Else = None})] }
+    | IF LPAREN conditionList RPAREN 
+      closeStmt 
+      ELSE openStmt                      { [IfStmt({ Expr = $3; 
+                                                     If = $5; 
+                                                     Else = Some($7)})] }
+    | WHILE LPAREN conditionList RPAREN 
+      openStmt                           { [WhileStmt{ Expr = $3; Stmts = $5 }] }    
+
+closeStmt:
+    //| simpleStmt                       { [$1] }
+    | simpleStmtBlock                    { $1 } //this is a list
+    | IF LPAREN conditionList RPAREN 
+      closeStmt 
+      ELSE closeStmt                     { [IfStmt({ Expr = $3; 
+                                                     If = $5; 
+                                                     Else = Some($7)})] }
+    | WHILE LPAREN conditionList RPAREN 
+      closeStmt                          { [WhileStmt({ Expr = $3; Stmts = $5})] }
+    //| closeStmt                          { $1 }
+     
+simpleStmtBlock:
+    | simpleStmt                            { [$1] }
+	| BEGIN statementlist END               { $2 }
+    | BEGIN TRY   statementlist END TRY      
+      BEGIN CATCH statementlist END CATCH   { [TryCatch({ TryBlock = $3; CatchBlock = $8 })] }
+    | simpleStmtBlock SEMI                  { $1 } //TODO: beware of tail-recursion
+
+simpleStmt:
+    | varDecl       { VarDecl($1) } 
+    | dmlStmtCTE    { DmlStmtCTE($1) } //TODO: handle SEMI-Colon CTE
+	| dmlStmt       { DmlStmt($1) }
+    | setSessionVar { SetSessionVar($1) } 
+    | tranStmt      { TranAction($1) }
+	| cursorStmt    { CursorStmt($1) }
+	| executeStmt   { ExecuteStmt($1) }
+
+dmlStmtCTE:
+	| commonTableExpr dmlStmt { {Stmt=$2; CTE=$1} }
+
+dmlStmt:
+    | query                  { Query($1) }
+    | insert                 { Insert($1) }
+    | update                 { Update($1) }
+    | delete                 { Delete($1) }	
+  
+// **** Transactions ****
+tranStmt:
+    | beginTran       { $1 }
+    | commitTran	  { $1 }
+    | commitWork      { $1 }
+    | rollBackWork    { $1 }
+    | rollBackTran    { $1 }
+    | saveTran        { $1 }
+
+
+tranVar: //TODO: ID or Variable are not fully correct here!
+    | ID    { $1 }
+    | AT ID { $2 }
+
+beginTran: //TODO: implement mark & DISTRIBUTED
+    //| BEGIN DISTRIBUTED TRAN tranVar            //TODO: not yet implemented
+    //| BEGIN DISTRIBUTED TRANSACTION tranVar   //TODO: not yet implemented
+    | BEGIN TRAN                            { BeginTran(None, None) }
+    | BEGIN TRANSACTION                     { BeginTran(None, None) }
+    //| BEGIN TRAN        tranVar withMarkOpt { BeginTran(Some($3), $4) }
+    //| BEGIN TRANSACTION tranVar withMarkOpt { BeginTran(Some($3), $4) }
+        
+withMarkOpt: //TODO: not yet implemented
+	|                     { None }
+	| WITH MARK STRING    { Some($3) } //TODO: mark is normaly a string-description!
+    
+
+commitTran:
+    | COMMIT TRAN                   { CommitTran(None) }
+    | COMMIT TRANSACTION            { CommitTran(None) }
+    | COMMIT TRAN tranVar           { CommitTran(Some($3)) }
+    | COMMIT TRANSACTION tranVar    { CommitTran(Some($3)) }
+
+commitWork:
+    | COMMIT         { CommitWork }
+    | COMMIT WORK    { CommitWork }
+
+rollBackWork:
+    | ROLLBACK WORK { RollBackWork }
+    | ROLLBACK      { RollBackWork }
+
+rollBackTran: 
+    | ROLLBACK TRAN                   { RollBackTran(None) }
+    | ROLLBACK TRANSACTION            { RollBackTran(None) }
+    | ROLLBACK TRAN tranVar           { RollBackTran(Some($3)) }
+    | ROLLBACK TRANSACTION tranVar    { RollBackTran(Some($3)) }
+
+saveTran: 
+    | SAVE TRAN        tranVar      { SaveTran($3) } 
+    | SAVE TRANSACTION tranVar      { SaveTran($3) }
+
+
+// **** Variables ****
+varDecl:
+    | DECLARE variable ID                    {{ Name = $2; Type = $3; Length = None }}
+    | DECLARE variable ID LPAREN ID RPAREN   {{ Name = $2; Type = $3; Length = Some($5) }}
+	| DECLARE variable ID LPAREN INT RPAREN  {{ Name = $2; Type = $3; Length = Some(string $5) }} //TODO: implement length as string
+
+variable:
+    | AT    ID    { $2 }
+    | AT AT ID    { $3 } //TODO: split off, and make a new type (GLOBAL var)
+
+variableList:
+	| variable                    { [$1] }
+	| variableList COMMA variable { $3::$1 }
+
+// **** Cursor ****
+cursorStmt:
+	| cursorDecl     { CursorDecl($1) }
+	| openCursor     { OpenCursor($1) }
+	| closeCursor    { CloseCursor($1) }
+	| releaseCursor  { ReleaseCursor($1) }
+	| fetch          { Fetch($1) }
+
+cursorName: 
+	| ID       { $1 } //TODO: ID is not correct here!
+	| variable { $1 } 
+
+cursorDecl: //TODO: not fully implemented yet //TODO: ISO-Syntax is not represented here!
+	DECLARE cursorName CURSOR 
+	cursorVisibilityOpt
+	cursorMovementOpt
+	cursorResultOpt
+	cursorLocksOpt
+	cursorWarningOpt
+	FOR query
+	//[ FOR UPDATE [ OF column_name [ ,...n ] ] ] //TODO: not fully implemented yet
+		{ $2 }
+
+cursorVisibilityOpt: //TODO: not fully implemented yet
+	|        {}
+	| LOCAL  {}
+	| GLOBAL {}
+
+cursorMovementOpt:  //TODO: not fully implemented yet
+	|              {}
+	| FORWARD_ONLY {}
+	| SCROLL       {}
+
+cursorResultOpt:  //TODO: not fully implemented yet
+	|               {}
+	| STATIC        {}
+	| KEYSET        {}
+	| DYNAMIC       {}
+	| FAST_FORWARD  {}
+
+cursorLocksOpt:  //TODO: not fully implemented yet
+	|               {}
+	| READ_ONLY     {}
+	| SCROLL_LOCKS  {}
+	| OPTIMISTIC    {}
+
+cursorWarningOpt:  //TODO: not fully implemented yet
+	|               {}
+	| TYPE_WARNING  {}
+
+openCursor:
+	| OPEN        cursorName { $2 }
+	| OPEN GLOBAL cursorName { $3 } //TODO: not fully implemented yet
+
+closeCursor:
+	| CLOSE        cursorName { $2 }
+	| CLOSE GLOBAL cursorName { $3 } //TODO: not fully implemented yet
+
+releaseCursor:
+	| DEALLOCATE        cursorName { $2 } 
+	| DEALLOCATE GLOBAL cursorName { $3 } //TODO: not fully implemented yet
+
+fetch:  //TODO: not fully implemented yet
+	| FETCH fetchDirectionOpt fromOpt        cursorName fetchIntoOpt { $4 }
+	| FETCH fetchDirectionOpt fromOpt GLOBAL cursorName fetchIntoOpt { $5 }
+
+fetchIntoOpt:  //TODO: not fully implemented yet
+	|                    { None }
+	| INTO variableList  { Some(List.rev $2) }
+
+fetchDirectionOpt: //TODO: not fully implemented yet
+    |                    { None }
+	| fetchDirection     { Some($1) }	
+
+fetchDirection:
+	| NEXT               {}
+	| PRIOR              {}
+	| FIRST              {}
+	| LAST               {}
+    | ABSOLUTE INT       {}
+	| ABSOLUTE variable  {}
+    | RELATIVE INT       {}
+	| RELATIVE variable  {}
+
+// **** Execute ****
+executeStmt:
+	| executeProc { ExecProc($1) }
+	| executeSql  { ExecSql($1) }
+
+executeProc: //TODO: implement result //TODO: implment execRecompileOpt
+	| execute             execModuleName execParamListOpt {{Procedure=$2; Parameter=List.rev $3; Result=None}} 
+	| execute variable EQ execModuleName execParamListOpt {{Procedure=$4; Parameter=List.rev $5; Result=Some($2)}}
+
+execModuleName: //TODO: implement variable as name
+	| ID       { $1 }  //TODO: id is not correct here
+	//| variable { $1 }
+
+execParamListOpt: //TODO: not fully implemented yet
+	|                                   { [] }
+	| execParam                         { [] }
+	| execParamListOpt COMMA execParam  { [] }
+
+execParam: //TODO: not fully implemented yet
+	| variable EQ execParamValue {}
+	|             execParamValue {}
+	| variable EQ execParamValue OUTPUT {}
+	|             execParamValue OUTPUT {}
+
+execParamValue: //TODO: not fully implemented yet
+	| value    { } //TODO: check if all types are correct here
+	//| variable { }
+	| DEFAULT  { }
+
+execRecompileOpt: //TODO: reflect in types
+	|                { }
+	| WITH RECOMPILE { }
+
+executeSql:
+	execute advancedString { {Sql = $2} } 
+	//TODO: [AS {USER | LOGIN} = name ] is not implemented
+
+advancedString:
+	| STRING                             { [$1] }
+	| variable                           { [$1] }
+	| advancedString PLUS STRING         { $3::$1 }
+	| advancedString PLUS variable       { $3::$1 }
+
+execute:
+	| EXEC		{}
+	| EXECUTE	{}
+
+// **** Operator ****
+compareOperator: 
+    | EQ   { Eq } 
+    | LT   { Lt } 
+    | LE   { Le } 
+    | GT   { Gt } 
+    | GE   { Ge } 
+    | LTGT { Ne } 
+    | NE   { Ne }  //TODO: this are only compare operator's! Bit-wise- & Logic- OPs missing.
+	| NLT  { NLt }
+	| NGT  { NGt }
+
+//    | LIKE { Like }
+//    | IN   { In }  //TODO: the left side of this is different from the other types
+
+logicalOperator:
+	| simpleLogicalOperator  {}
+	| specialLogicalOperator {}
+
+simpleLogicalOperator:
+	| AND {}
+	//| NOT //INFO: this is a unary operator
+	| OR  {}
+
+specialLogicalOperator:
+	| BETWEEN  {}	//test_expression [ NOT ] BETWEEN begin_expression AND end_expression
+	//| EXISTS {} //TODO: EXISTS is already implemented
+
+	| IN	   {}//test_expression [ NOT ] IN ( subquery | expression [ ,...n ] ) 
+	| LIKE	   {}	//match_expression [ NOT ] LIKE pattern [ ESCAPE escape_character ]
+
+	| ALL      {}    //scalar_expression { = | <> | != | > | >= | !> | < | <= | !< } ALL ( subquery )
+	| ANY	   {}	//TODO: see some
+	| SOME     {} //scalar_expression { = | < > | ! = | > | > = | ! > | < | < = | ! < } { SOME | ANY } ( subquery ) 
+
+
+assignmentOperator:
+	| PLUS_EQ   {}
+	| MINUS_EQ  {} 
+	| STAR_EQ   {} 
+	| DIV_EQ    {} 
+	| MOD_EQ    {}
+	| AND_EQ    {}
+	| XOR_EQ    {}
+	| AND_EQ    {}
+	| XOR_EQ    {}
+	| OR_EQ     {}
+
+arithOperator:
+	| PLUS     {}
+	| MINUS    {}
+	| STAR     {}
+	| DIV      {}
+	| MODULO   {}
+
+bitOperator:
+	| BIT_AND    {}
+	| BIT_OR     {}
+	| BIT_XOR    {}
+	//| BIT_NOT //INFO: this is a unary operator
+
+binaryOperator:
+	| bitOperator            {}
+	| arithOperator          {}
+	| simpleLogicalOperator  {}
+	| compareOperator        {}
+
+unaryOperator: //TODO: use special precedence here, or at binary-level. let's see what's is more readable
+	| PLUS     {}
+	| MINUS    {}
+	| BIT_NOT  {}
+	
+
+//TODO: not yet implemented!
+//expression: 
+//	{ constant | scalar_function | [ table_name. ] column | variable 
+//		| ( expression ) | ( scalar_subquery ) 
+//		| { unary_operator } expression 
+//		| expression { binary_operator } expression 
+//		| ranking_windowed_function | aggregate_windowed_function
+//	}
+
+//caseExpr: //TODO: not yet implemented
+//	| simpleCase
+//	| searchedCase
+//
+//simpleCase:
+//	CASE input_expression 
+//		 WHEN when_expression THEN result_expression [ ...n ] 
+//		 [ ELSE else_result_expression ] 
+//	END 
+//
+//searchedCase: 
+//	CASE
+//		 WHEN Boolean_expression THEN result_expression [ ...n ] 
+//		 [ ELSE else_result_expression ] 
+//	END
+
+
+// **** value ****
+value:   
+	| NULL					{ Null }
+    | INT                   { Int($1) }
+    | FLOAT                 { Float($1) }
+    | ID                    { Identifier($1) }
+    | variable              { Variable($1) } //TODO: create own type for this var
+	//| constant         
+	| STRING                { String($1) }
+	// query			    { SubQuery($1) }
+
+valueExpr:
+	| value               { Value($1) }
+	| LPAREN query RPAREN { QueryValueExpr($2) }
+
+// **** condition **** 
+conditionValue:
+	|     valueExpr { $1 } 
+	| NOT valueExpr { $2 } //TODO: reflect NOT in types //TODO: in operator and subQuery can false-positive
+
+condition: //TODO: implement NOT/
+	| conditionValue compareOperator conditionValue  { Cond($1, $2, $3) }   
+	//| conditionValue op ALL conditionValue         { Cond($1, $2, $4) } //TODO: implement ALL
+	|     EXISTS LPAREN query RPAREN                 { Exists($3) }
+	| NOT EXISTS LPAREN query RPAREN                 { Exists($4) } //TODO: reflect NOTn
+
+conditionList:   
+    | condition                    { $1 }   
+    | conditionList AND condition  { And($3, $1) } //TODO: beware of tail-recursive!
+    | conditionList OR condition   { Or($3, $1) }  //TODO: beware of tail-recursive! 
+    | LPAREN conditionList RPAREN  { $2 } //TODO: reflect this in the data structure!
+
+// **** Table Hints ****     
+tableHintOpt: 
+    |            { None }
+    | tableHint  { Some($1) }
+
+tableHint: //TODO: not fully implemented yet (reflect in types)
+    | WITH          LPAREN tableHintList RPAREN { $3 }
+    | WITH NOEXPAND LPAREN tableHintList RPAREN { $4 } //TODO: NOEXPAND not yet pushed to the outer world
+
+tableHintList:
+	|                     tableHintItem { [$1] }
+	| tableHintList COMMA tableHintItem { $3::$1 }
+
+tableHintItem: 
+//  |  INDEX ( index_value [ ,...n ] ) {}
+//  | INDEX =  ( index_value ) {}
+  | KEEPIDENTITY        { KeepIdentity }
+  | KEEPDEFAULTS        { KeepDefaults }
+  | FASTFIRSTROW        { FastFirstRow }
+//  | FORCESEEK [( index_value ( index_column_name  [ ,... ] ) ) ]
+  | FORCESCAN           { ForceScan }
+  | HOLDLOCK            { HoldLock } 
+  | NOLOCK              { NoLock }
+  | NOWAIT              { NoWait }
+  | IGNORE_CONSTRAINTS  { IgnoreConstraints }
+  | IGNORE_TRIGGERS     { IgnoreTriggers }
+  | PAGLOCK             { PagLock }
+  | READCOMMITTED       { ReadCommitted }
+  | READCOMMITTEDLOCK   { ReadcommittedLock }
+  | READUNCOMMITTED     { ReadUnCommitted }
+  | READPAST            { ReadPast }
+  | REPEATABLEREAD      { ReapeatAbleRead }
+  | ROWLOCK             { RowLock }
+  | SERIALIZABLE        { Serializable }
+  | TABLOCK             { TabLock }
+  | TABLOCKX            { TabLockX }
+  | UPDLOCK             { UpdLock }
+  | XLOCK               { XLock }
+
+// **** DML Statements **** 
+
+commonTableExpr:	
+	WITH tableExprList { List.rev $2 }
+
+tableExprList:
+	| tableExpr                     { [$1] }
+	| tableExprList COMMA tableExpr { $3::$1 }
+	
+tableExpr: //TODO: implement hints
+	| ID LPAREN identifierList RPAREN 
+	  AS LPAREN query RPAREN          {{ Name = $1; 
+                                         Columns = Some(List.rev $3);
+                                         Query = $7; }}
+	| ID 
+	  AS LPAREN query RPAREN          {{ Name = $1; 
+                                         Columns = None;
+                                         Query = $4; }}
+
+fromOpt:
+    |      {}
+    | FROM {}
+
+insert:
+    | insertHead ID tableHintOpt
+      insertValues                       {{Table = $2; 
+                                           Columns = None;  
+                                           Values = $4;
+                                           Top = $1 }}
+    | insertHead ID tableHintOpt
+      LPAREN identifierList RPAREN
+      insertValues                       {{Table = $2; 
+                                           Columns = Some($5); 
+                                           Values = $7;
+                                           Top = $1 }}
+
+insertHead:
+    | INSERT topClauseOpt      { $2 } //TODO: this can be written as Option
+    | INSERT topClauseOpt INTO { $2 }
+
+insertValues:
+    | VALUES LPAREN insertValueList RPAREN { ValueList(List.rev $3) }
+    //| derived_table
+    //| execute_statement or query //see below
+    | query                            { InsertQuery($1) }
+    | DEFAULT VALUES                   { InsertDefaults } //TODO: not yet implemented
+
+insertValueList:
+    | valueExpr                       { [$1] }
+    | insertValueList COMMA valueExpr { $3 :: $1 }
+    //| expression
+    //| DEFAULT                  { "DEFAULT" } 
+    //| NULL                     { "NULL" }
+
+//valueList: //TODO: this was a insertValueList before... now it is obsolete
+//    | ID                 { [$1] }
+//    | valueList COMMA ID { $3 :: $1 }
+//    //| expression
+//    //| DEFAULT            { "DEFAULT" } 
+//    //| NULL               { "NULL" }
+
+update: //TODO: Update WHERE has some special cases!
+    UPDATE topClauseOpt ID tableHintOpt
+    SET    updateList
+	tableSource
+    whereClause {{Table = $3; 
+                  TableSource = Some($7); 
+                  UpdateAssignments = List.rev $6; 
+                  Where = $8; 
+                  Top = $2;
+                  TableHintLimited = $4 }}
+
+updateExpr:
+	| ID EQ valueExpr                { {Field = $1; Value = $3} }
+	//| query                        { $1 }
+	//| constantExpr                 { $1 } //TODO: reflect in types
+
+
+updateList:
+	|                  updateExpr    { [$1] }
+    | updateList COMMA updateExpr    { $3 :: $1 } 
+
+delete:
+    | DELETE topClauseOpt fromOpt ID tableHintOpt
+      tableSource whereClause         {{ Table = $4; 
+                                         TableSource = Some($6); 
+                                         Where = $7; 
+                                         TableHintLimited = $5;
+                                         Top = $2 }}
+    | DELETE topClauseOpt fromOpt ID tableHintOpt
+      whereClause                     {{ Table = $4; 
+                                         TableSource = None; 
+                                         Where = $6; 
+                                         TableHintLimited = $5;
+                                         Top = $2 }}
+
+overClause:
+	| OVER LPAREN PARTITION BY identifierList orderByClause RPAREN                           
+	                                   {RankingWindow({PartitionBy=Some($5); OrderBy=$6})}
+	| OVER LPAREN orderByClause RPAREN {RankingWindow({PartitionBy=None; OrderBy=$3})}
+
+windowFunction:
+	| RANK       LPAREN     RPAREN overClause { Rank($4) }
+	| NTILE      LPAREN INT RPAREN overClause { NTile($3, $5) } //TODO: this could be a const expression...
+	| DENSE_RANK LPAREN     RPAREN overClause { DenseRank($4) }
+	| ROW_NUMBER LPAREN     RPAREN overClause { RowNumber($4) }
+
+queryColumn: //TODO: implement TOP 1
+    //TODO: value intersects with aliasedIdentifier
+	//| aliasedIdentifier          { Column($1) }
+	| valueExpr						 { QueryColumn({Value = $1; Alias = None}) }
+	| valueExpr ID					 { QueryColumn({Value = $1; Alias = Some($2)}) }
+	| valueExpr AS ID				 { QueryColumn({Value = $1; Alias = Some($3)}) }
+	| windowFunction                 { WindowFunction({WindowFunction=$1; Alias=None}) }
+	| windowFunction ID              { WindowFunction({WindowFunction=$1; Alias=Some($2)}) }
+	| windowFunction AS ID           { WindowFunction({WindowFunction=$1; Alias=Some($3)}) }
+
+queryColumnList: 
+	| queryColumn                       { [$1] }
+	| queryColumnList COMMA queryColumn { $3 :: $1 }
+
+query:
+    SELECT queryOptions queryColumnList   
+    tableSource
+    queryModifiers
+        {{ TableSource = $4;
+           QueryOptions = $2;
+           Columns = List.rev $3;
+           QueryModifiers = $5 }}
+
+topClauseOpt:
+    |           { None }
+    | topClause { Some($1) }
+
+topClause:
+    | TOP LPAREN INT RPAREN            {{ Top = $3; Percent = false }}
+    | TOP LPAREN INT RPAREN PERCENT    {{ Top = $3; Percent = true  }}
+
+topClauseAltOpt:
+    |              { None }
+    | topClauseAlt { Some($1) }
+
+topClauseAlt:
+    | TOP        INT                   {{ Top = $2; Percent = false }} 
+    | TOP        INT PERCENT           {{ Top = $2; Percent = true  }} 
+
+queryOptions:
+    |                        {{ Top = None;     Distinct = false }}
+    | topClause    DISTINCT  {{ Top = Some($1); Distinct = true  }}
+    | topClauseAlt DISTINCT  {{ Top = Some($1); Distinct = true  }}
+    |              DISTINCT  {{ Top = None;     Distinct = true  }}
+    
+
+queryModifiers:
+    | whereClause groupByClause orderByClauseOpt {{ Where = $1; GroupBy = $2;   OrderBy = $3 }}
+    | whereClause               orderByClauseOpt {{ Where = $1; GroupBy = None; OrderBy = $2 }}    
+
+
+tableSource:
+    | FROM tableSourceList          {{ Tables = List.rev $2; Joins  = [] }}
+    | FROM tableSourceList joinList {{ Tables = List.rev $2; Joins  = $3 }}
+
+tableSourceList:
+	| tableSourceElem						{ [$1] }
+	| tableSourceList COMMA tableSourceElem { $3::$1 }
+
+tableSourceElem:
+	| aliasedIdentifier tableHintOpt { $1 } //TODO: reflect tableHint
+//    table_or_view_name [ [ AS ] table_alias ] [ <tablesample_clause> ] 
+//        [ WITH ( < table_hint > [ [ , ]...n ] ) ] 
+//    | rowset_function [ [ AS ] table_alias ] 
+//        [ ( bulk_column_alias [ ,...n ] ) ] 
+//    | user_defined_function [ [ AS ] table_alias ] ]
+//    | OPENXML <openxml_clause> 
+//    | derived_table [ AS ] table_alias [ ( column_alias [ ,...n ] ) ] 
+//    | <joined_table> 
+//    | <pivoted_table> 
+//    | <unpivoted_table>
+//      | @variable [ [ AS ] table_alias ]
+//        | @variable.function_call ( expression [ ,...n ] ) [ [ AS ] table_alias ] [ (column_alias [ ,...n ] ) ]
+
+//tableList : aliasedIdentifierList  { $1 }
+
+ 
+// join clause
+joinList:
+    | joinClause                    { [$1] }   
+    | joinClause joinList           { $1 :: $2 }       
+
+joinClause:
+    |             JOIN aliasedIdentifier joinOnClause    { $2, Inner, $3 }
+    | INNER       JOIN aliasedIdentifier joinOnClause    { $3, Inner, $4 }
+    | LEFT  OUTER JOIN aliasedIdentifier joinOnClause    { $4, Left,  $5 }
+    | LEFT        JOIN aliasedIdentifier joinOnClause    { $3, Left,  $4 }       
+    | RIGHT OUTER JOIN aliasedIdentifier joinOnClause    { $4, Right, $5 }
+    | RIGHT       JOIN aliasedIdentifier joinOnClause    { $3, Right, $4 }       
+    | FULL  OUTER JOIN aliasedIdentifier joinOnClause    { $4, Full,  $5 }
+    | CROSS       JOIN aliasedIdentifier                 { $3, Cross,      None }
+    | CROSS APPLY      aliasedIdentifier                 { $3, CrossApply, None }
+    | OUTER APPLY      aliasedIdentifier                 { $3, OuterApply, None }
+ 
+joinOnClause:   
+    | ON conditionList                  { Some($2) } //TODO: move some to the place, where None is! Or, not? 
+
+
+// where clause 
+whereClause:   
+    |                                   { None } 
+    | WHERE conditionList               { Some($2) } //TODO: move some to the place, where None is! Or, not? 
+
+
+
+groupByClause:
+    | GROUP BY identifierList                 { Some({ GroupBy = $3; Having = None}) } //TODO: move some to the place, where None is! Or, not? 
+    | GROUP BY identifierList havingClause    { Some({ GroupBy = $3; Having = Some($4)}) } //TODO: move some to the place, where None is! Or, not? 
+
+//groupByList:
+//    | ID                          { [$1] }
+//    | groupByList COMMA ID        { $1 :: $3 }
+
+havingClause:
+    | HAVING conditionList          { $2 }
+
+// order by clause
+
+orderByClauseOpt:
+    |                               { [] }
+	| orderByClause					{ $1 }
+
+orderByClause:
+    | ORDER BY orderByList          { $3 }
+
+orderByList:
+    | orderBy                       { [$1] }
+    | orderBy COMMA orderByList     { $1 :: $3 }
+
+orderBy:
+    | ID                            { $1, Asc  }
+    | ID ASC                        { $1, Asc  }
+    | ID DESC                       { $1, Desc }
+
+
+identifierList:
+    | ID                       { [$1] }
+    | identifierList COMMA ID  { $3 :: $1 }
+
+//aliasedIdentifierList:
+//    | aliasedIdentifier                             { [$1] }
+//    | aliasedIdentifierList COMMA aliasedIdentifier { $3 :: $1 }
+
+aliasedIdentifier:
+    | ID        {{ Identifier = $1; Alias = None     }}
+    | ID AS ID  {{ Identifier = $1; Alias = Some($3) }}
+    | ID ID     {{ Identifier = $1; Alias = Some($2) }}
+
+setSessionVar:
+    //Datums- und Zeitanweisungen
+    //| SET DATEFIRST
+    //| SET DATEFORMAT
+
+    //Sperranweisungen
+    //| SET DEADLOCK_PRIORITY
+    //| SET LOCK_TIMEOUT
+
+    //Verschiedene Anweisungen
+    //| SET CONCAT_NULL_YIELDS_NULL
+    //| SET CURSOR_CLOSE_ON_COMMIT
+    //| SET FIPS_FLAGGER
+    //| SET IDENTITY_INSERT
+    //| SET LANGUAGE
+    //| SET OFFSETS
+    | SET QUOTED_IDENTIFIER onOffOption { QuotedIdentifier($3) }
+
+    //Abfrageausführungsanweisungen
+    //| SET ARITHABORT
+    //| SET ARITHIGNORE
+    //| SET FMTONLY
+    | SET NOCOUNT onOffOption           { NoCount($3) }
+    //| SET NOEXEC
+    //| SET NUMERIC_ROUNDABORT
+    //| SET PARSEONLY
+    //| SET QUERY_GOVERNOR_COST_LIMIT
+    //| SET ROWCOUNT
+    //| SET TEXTSIZE
+
+    //Anweisungen für ISO-Einstellungen
+    //| SET ANSI_DEFAULTS
+    //| SET ANSI_NULL_DFLT_OFF
+    //| SET ANSI_NULL_DFLT_ON
+    | SET ANSI_NULLS onOffOption        { AnsiNulls($3) }
+    //| SET ANSI_PADDING
+    //| SET ANSI_WARNINGS
+
+    //Statistikanweisungen
+    //| SET FORCEPLAN
+    //| SET SHOWPLAN_ALL
+    //| SET SHOWPLAN_TEXT
+    //| SET SHOWPLAN_XML
+    //| SET STATISTICS IO
+    //| SET STATISTICS XML
+    //| SET STATISTICS PROFILE
+    //| SET STATISTICS TIME
+
+    //Transaktionsanweisungen
+    //| SET IMPLICIT_TRANSACTIONS
+    //| SET REMOTE_PROC_TRANSACTIONS
+    //| SET TRANSACTION ISOLATION LEVEL
+    //| SET XACT_ABORT
+
+
+onOffOption:
+    | ON    { true }
+    | OFF   { false }
+
+// **** Sql Batch **** 
+
+batch:
+    | batchBlock  { $1 }
+    | batch GO    { $1 }
+
+batchBlock:
+    |               { None }
+    | statementlist { Some(DmlBlock($1)) }
+    | ddlOperation  { Some(DdlBlock($1)) }
+
+
+// **** DDL Operations **** 
+
+ddlOperation:
+    | createTrigger      { CreateTrigger  ($1) }
+    | createProcedure    { CreateProcedure($1) }
+    | createTable        { CreateTable    ($1) }
+    | createType         { CreateType     ($1) }
+    | createFunction     { CreateFunction ($1) }
+    | dropTrigger        { DropTrigger    ($1) }
+    | dropProcedure      { DropProcedure  ($1) }
+    | dropView           { DropView       ($1) }
+    | dropTable          { DropTable      ($1) }
+    | dropType           { DropType       ($1) }
+    | dropFunction       { DropFunction   ($1) }
+    | alterTrigger       { AlterTrigger   ($1) }
+    | alterProcedure     { AlterProcedure ($1) }
+    | alterView          { AlterView      ($1) }
+    | alterTable         { AlterTable     ($1) }
+    | alterType          { AlterType      ($1) }
+    | alterFunction      { AlterFunction  ($1) }
+
+
+// *** Trigger ***
+createTrigger:
+    | CREATE TRIGGER ID ON ID
+      triggerType
+      AS triggerBody { $3 }
+
+alterTrigger:
+    | ALTER TRIGGER ID ON ID
+      triggerTypeDecl
+      AS triggerBody { $3 }
+
+dropTrigger:
+    | DROP TRIGGER ID   { $3 }
+
+triggerType: //TODO: FIXME: this could be written smarter!
+    | INSERT                            {}
+    | UPDATE                            {}
+    | DELETE                            {}
+    | INSERT COMMA UPDATE               {}
+    | INSERT COMMA DELETE               {}
+    | UPDATE COMMA INSERT               {}
+    | UPDATE COMMA DELETE               {}
+    | DELETE COMMA INSERT               {}
+    | DELETE COMMA UPDATE               {}
+    | INSERT COMMA UPDATE COMMA DELETE  {}
+    | INSERT COMMA DELETE COMMA UPDATE  {}
+    | UPDATE COMMA INSERT COMMA DELETE  {}
+    | UPDATE COMMA DELETE COMMA INSERT  {}
+    | DELETE COMMA UPDATE COMMA DELETE  {}
+    | DELETE COMMA DELETE COMMA UPDATE  {}
+
+triggerTypeDecl:
+    | FOR        triggerType {}
+    | AFTER      triggerType {}
+    | INSTEAD OF triggerType {}
+
+triggerBody:
+     statementBlock {}
+
+// *** Procedure ***
+createProcedure:
+    | CREATE PROCEDURE ID { $3 }
+    | CREATE PROC ID      { $3 }
+
+alterProcedure:
+    | ALTER PROCEDURE ID { $3 }
+    | ALTER PROC ID      { $3 }
+
+dropProcedure:
+    | DROP PROCEDURE ID  { $3 }
+    | DROP PROC ID       { $3 }
+
+// *** View *** 
+createView:
+    | CREATE VIEW ID    { $3 }
+
+alterView:
+    | ALTER VIEW ID     { $3 }
+
+dropView:
+    | DROP VIEW ID      { $3 }
+
+
+// *** Table *** 
+createTable:
+    | CREATE TABLE ID   { $3 }
+
+alterTable:
+    | ALTER TABLE ID    { $3 }
+
+dropTable:
+    | DROP TABLE ID     { $3 }
+
+
+// *** Type *** 
+createType:
+    | CREATE TYPE ID    { $3 }
+
+alterType:
+    | ALTER TYPE ID     { $3 }
+
+dropType:
+    | DROP TYPE ID      { $3 }
+
+
+// *** Function *** 
+createFunction:
+    | CREATE FUNCTION ID { $3 }
+
+alterFunction:
+    | ALTER FUNCTION ID  { $3 }
+
+dropFunction:
+    | DROP FUNCTION ID   { $3 }
+
+%%
